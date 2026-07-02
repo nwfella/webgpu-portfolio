@@ -2,6 +2,8 @@
 
 **Raw WebGPU + WGSL compute shader engine.** No Three.js. No Babylon.js. No frameworks.
 
+**[🌐 LIVE DEMO → nwfella.github.io/webgpu-portfolio](https://nwfella.github.io/webgpu-portfolio/)**
+
 [![WebGPU](https://img.shields.io/badge/WebGPU-✓-6c5ce7?logo=webgpu)](https://webgpu.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?logo=typescript)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-6-646cff?logo=vite)](https://vitejs.dev)
