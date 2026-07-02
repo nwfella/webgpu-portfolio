@@ -12,7 +12,16 @@ import { Renderer } from '../render/renderer';
 import { HUD } from '../ui/hud';
 import { LoadingScreen } from '../ui/loading';
 import { showFallbackPortfolio } from '../fallback/fallback';
-import { PROJECTS } from '../portfolio/data';
+
+/** Race a promise against a timeout — rejects if slower */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`TIMEOUT: ${label} (${ms}ms)`)), ms)
+    ),
+  ]);
+}
 
 async function main(): Promise<void> {
   const loading = new LoadingScreen();
@@ -24,7 +33,7 @@ async function main(): Promise<void> {
     setTimeout(() => {
       loading.hide();
       showFallbackPortfolio();
-    }, 500);
+    }, 300);
     return;
   }
 
@@ -32,9 +41,15 @@ async function main(): Promise<void> {
     loading.setProgress(10, 'acquiring GPU device...');
 
     const canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
-    const deviceManager = await DeviceManager.create(canvas);
+    // Add a 5-second timeout: many mobile/tablet GPUs advertise WebGPU
+    // but hang forever on adapter/device creation.
+    const deviceManager = await withTimeout(
+      DeviceManager.create(canvas),
+      5000,
+      'WebGPU device acquisition'
+    );
 
-    loading.setProgress(25, 'bundling shaders...');
+    loading.setProgress(30, 'bundling shaders...');
 
     // Initialize systems
     const camera = new Camera();
@@ -42,8 +57,8 @@ async function main(): Promise<void> {
     const timer = new Timer();
     const renderer = new Renderer(deviceManager);
 
-    loading.setProgress(45, 'building particle system...');
-    await renderer.init();
+    loading.setProgress(50, 'building particle system...');
+    await withTimeout(renderer.init(), 5000, 'renderer initialization');
 
     loading.setProgress(70, 'configuring scene...');
 
@@ -93,10 +108,10 @@ async function main(): Promise<void> {
         obj.rotation[1] += dt * 0.2;
       }
 
-      // Ready signal
+      // Ready signal — hide loading after first frame
       if (frameCount === 0) {
-        loading.setProgress(100, 'running...');
-        setTimeout(() => loading.hide(), 300);
+        loading.setProgress(100, '⚡ running');
+        setTimeout(() => loading.hide(), 200);
       }
       frameCount++;
 
@@ -107,11 +122,11 @@ async function main(): Promise<void> {
 
   } catch (err) {
     console.error('WebGPU init failed:', err);
-    loading.setProgress(100, 'GPU init failed — showing fallback');
+    loading.setProgress(100, 'WebGPU unavailable — showing static portfolio');
     setTimeout(() => {
       loading.hide();
       showFallbackPortfolio();
-    }, 500);
+    }, 400);
   }
 }
 
