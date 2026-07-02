@@ -3,6 +3,7 @@
  *
  * Orchestrates: device init → asset loading → render loop → UI overlay
  * Falls back to static HTML when WebGPU is unavailable.
+ * Uses timeouts everywhere so nothing hangs forever.
  */
 import { DeviceManager } from '../core/device';
 import { Timer } from '../core/timer';
@@ -23,68 +24,140 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   ]);
 }
 
+/** Safe element query — returns null instead of throwing */
+function safeElem(id: string): HTMLElement | null {
+  return document.getElementById(id);
+}
+
+/** Safe LoadingScreen that won't crash if DOM elements are missing */
+class SafeLoadingScreen {
+  private fill: HTMLElement | null = safeElem('loader-fill');
+  private status: HTMLElement | null = safeElem('loading-status');
+  private screen: HTMLElement | null = safeElem('loading-screen');
+
+  setProgress(pct: number, msg: string): void {
+    if (this.fill) this.fill.style.width = `${Math.min(100, pct)}%`;
+    if (this.status) this.status.textContent = msg;
+  }
+
+  hide(): void {
+    if (this.screen) this.screen.classList.add('hidden');
+  }
+}
+
+/** Try WebGPU init. Returns the manager or null. */
+async function tryInitWebGPU(canvas: HTMLCanvasElement): Promise<DeviceManager | null> {
+  if (!navigator.gpu) return null;
+
+  // Try without powerPreference first — some browsers hang on 'high-performance'
+  try {
+    const adapter = await withTimeout(
+      navigator.gpu.requestAdapter(),
+      3000,
+      'requestAdapter'
+    );
+    if (!adapter) return null;
+
+    const device = await withTimeout(
+      adapter.requestDevice(),
+      3000,
+      'requestDevice'
+    );
+    if (!device) return null;
+
+    const context = canvas.getContext('webgpu');
+    if (!context) return null;
+
+    const mgr = new DeviceManager();
+    mgr['device'] = device;
+    mgr['adapter'] = adapter;
+    mgr['canvas'] = canvas;
+    mgr['context'] = context;
+    mgr['format'] = navigator.gpu.getPreferredCanvasFormat();
+
+    context.configure({
+      device,
+      format: mgr['format'],
+      alphaMode: 'premultiplied',
+    });
+    return mgr;
+  } catch {
+    // Also try with 'low-power' as a fallback
+    try {
+      const adapter = await withTimeout(
+        navigator.gpu.requestAdapter({ powerPreference: 'low-power' }),
+        3000,
+        'requestAdapter (low-power)'
+      );
+      if (!adapter) return null;
+      const device = await withTimeout(
+        adapter.requestDevice(),
+        3000,
+        'requestDevice (low-power)'
+      );
+      if (!device) return null;
+      const context = canvas.getContext('webgpu');
+      if (!context) return null;
+      const mgr = new DeviceManager();
+      mgr['device'] = device;
+      mgr['adapter'] = adapter;
+      mgr['canvas'] = canvas;
+      mgr['context'] = context;
+      mgr['format'] = navigator.gpu.getPreferredCanvasFormat();
+      context.configure({ device, format: mgr['format'], alphaMode: 'premultiplied' });
+      return mgr;
+    } catch {
+      return null;
+    }
+  }
+}
+
 async function main(): Promise<void> {
-  const loading = new LoadingScreen();
+  const loading = new SafeLoadingScreen();
   loading.setProgress(5, 'checking WebGPU support...');
 
-  // Check WebGPU availability
-  if (!navigator.gpu) {
-    loading.setProgress(100, 'WebGPU not available — showing fallback');
-    setTimeout(() => {
-      loading.hide();
-      showFallbackPortfolio();
-    }, 300);
+  const canvas = safeElem('gpu-canvas') as HTMLCanvasElement | null;
+  if (!canvas) {
+    loading.setProgress(100, 'canvas not found');
+    setTimeout(() => { loading.hide(); showFallbackPortfolio(); }, 200);
+    return;
+  }
+
+  loading.setProgress(10, 'acquiring GPU device...');
+  const deviceManager = await tryInitWebGPU(canvas);
+
+  if (!deviceManager) {
+    loading.setProgress(100, 'WebGPU unavailable — showing static portfolio');
+    setTimeout(() => { loading.hide(); showFallbackPortfolio(); }, 300);
     return;
   }
 
   try {
-    loading.setProgress(10, 'acquiring GPU device...');
-
-    const canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
-    // Add a 5-second timeout: many mobile/tablet GPUs advertise WebGPU
-    // but hang forever on adapter/device creation.
-    const deviceManager = await withTimeout(
-      DeviceManager.create(canvas),
-      5000,
-      'WebGPU device acquisition'
-    );
-
     loading.setProgress(30, 'bundling shaders...');
-
-    // Initialize systems
     const camera = new Camera();
     const input = new InputManager();
     const timer = new Timer();
     const renderer = new Renderer(deviceManager);
 
     loading.setProgress(50, 'building particle system...');
-    await withTimeout(renderer.init(), 5000, 'renderer initialization');
+    await withTimeout(renderer.init(), 8000, 'renderer initialization');
 
     loading.setProgress(70, 'configuring scene...');
-
-    // Configure camera
-    const aspect = deviceManager.aspect;
-    camera.updateProjection(Math.PI / 4, aspect, 0.1, 100);
-
-    // Attach input
+    camera.updateProjection(Math.PI / 4, deviceManager.aspect, 0.1, 100);
     input.attach(canvas);
 
     // Create HUD overlay
     const hud = new HUD();
 
     loading.setProgress(85, 'starting render loop...');
-
-    // Resize once
     deviceManager.resize();
 
-    // Frame scheduling
     let frameCount = 0;
     const frame = () => {
       timer.tick();
       const dt = timer.delta;
       const t = timer.elapsed;
 
-      // Handle resize
       if (canvas.clientWidth !== deviceManager.width ||
           canvas.clientHeight !== deviceManager.height) {
         deviceManager.resize();
@@ -92,29 +165,21 @@ async function main(): Promise<void> {
         renderer.resize();
       }
 
-      // Update input
       input.endFrame();
-
-      // Update camera
       camera.updateInput(input.state, dt);
       camera.updateProjection(Math.PI / 4, deviceManager.aspect, 0.1, 100);
-
-      // Render
       renderer.render(camera, t, dt, input.state);
 
-      // Animate project object rotation
       for (const obj of renderer.objects) {
         obj.rotation[0] += dt * 0.3;
         obj.rotation[1] += dt * 0.2;
       }
 
-      // Ready signal — hide loading after first frame
       if (frameCount === 0) {
         loading.setProgress(100, '⚡ running');
         setTimeout(() => loading.hide(), 200);
       }
       frameCount++;
-
       requestAnimationFrame(frame);
     };
 
@@ -123,12 +188,14 @@ async function main(): Promise<void> {
   } catch (err) {
     console.error('WebGPU init failed:', err);
     loading.setProgress(100, 'WebGPU unavailable — showing static portfolio');
-    setTimeout(() => {
-      loading.hide();
-      showFallbackPortfolio();
-    }, 400);
+    setTimeout(() => { loading.hide(); showFallbackPortfolio(); }, 400);
   }
 }
 
-// Boot
-main();
+// Boot — catch any top-level crash
+main().catch(err => {
+  console.error('Fatal error:', err);
+  const s = new SafeLoadingScreen();
+  s.setProgress(100, 'Error — showing static portfolio');
+  setTimeout(() => { s.hide(); showFallbackPortfolio(); }, 300);
+});
